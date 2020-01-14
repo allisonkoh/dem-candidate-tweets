@@ -1,0 +1,485 @@
+---
+title: "Final Project- Learning from Democratic Candidates' Tweets"
+subtitle: "Using cosine similarities, structured topic models and wordfish to map out the political position of candidates and key issues in advance of the 2020 Democratic Primary Election Debates"
+author: "Allison Koh"
+output:
+  html_notebook:
+    toc: true
+    toc_depth: 3
+    theme: cerulean
+    fig_caption: yes
+---
+
+```{r setup, include = FALSE}
+rm(list=ls(all=TRUE))
+library(devtools)
+library(dplyr)
+library(magrittr)
+library(readr)
+library(tidyverse)
+library(tidytext)
+library(broom)
+library(ggplot2)
+library(gridExtra)
+library(reshape2)
+library(viridis)
+library(zoo)
+library(colormap)
+library(scales)
+library(stm)
+library(quanteda)
+library(text2vec)
+```
+
+```{r loading data, include=FALSE}
+# load dataset 
+dat <- read_csv("dem_candidate_tweets_20190514v2-filtered.csv")
+
+# subset from november 2018 onwards because a lot of these people surfaced around midterm elections (also some limits on twitter api)
+dat <- dat[dat$created > as.Date("2018-11-01"),] 
+```
+
+```{r pre-processing text and creating corpus amd dfm objects, include=FALSE}
+# removing URLs, hashtags, Twitter handles
+tweets <- gsub("http.*", "", dat$text)
+tweets <- gsub("#.*", "", tweets)
+tweets <- gsub("@.*", "", tweets)
+dat$text <- tweets 
+
+# write_csv for cleaned data 
+# write_csv(dat, "dem_candidate_tweets_20190514v2-filtered-cleaned.csv")
+
+# build corpus, tokenize, etc. [using bigrams]
+dem_corp <- corpus(dat)
+dem_tok <- tokens(dem_corp,what="word",remove_numbers=T,remove_punct=T)
+dem_tok <- tokens_tolower(dem_tok,keep_acronyms=T,locale="en")
+dem_tok <- tokens_select(dem_tok,c("[\\d-]", "[[:punct:]]", "^.{1}$"), 
+                       selection = "remove", 
+                    valuetype="regex", verbose = TRUE)
+dem_tok <- tokens_remove(dem_tok,c(stopwords("english"),
+                                   c("people","need","president","country","one","us","today","new","time","must")))
+
+# dfm
+dem_dfm <- dfm(dem_tok,groups="screenName",verbose=FALSE)
+dem_dfm2 <- dfm(dem_tok,groups=c("qual"),verbose=FALSE)
+dem_dfm3 <- dfm(dem_tok,groups=c("screenName","qual"),verbose=FALSE)
+
+# tf-idf 
+dem_dfm_tfidf <- dfm_tfidf(dem_dfm)
+dem_dfm2_tfidf <- dfm_tfidf(dem_dfm2)
+dem_dfm3_tfidf <- dfm_tfidf(dem_dfm3)
+```
+
+```{r setting defaults and other small tweaks, include=FALSE}
+# as.Date, as.factor 
+dat$created <- as.Date(as.yearmon(dat$created))
+dat$qual <- as.factor(dat$qual)
+
+# set defaults for ggplot
+require(ggplot2)
+theme_set(theme_minimal())
+
+# get color codes for viridis to manually set palettes that are visually consistent
+# scales::show_col(colormap(format='hex',nshades=20))
+
+# set palettes 
+pal2 <- c("#313668","#51a2c8")
+```
+
+## Introduction
+
+Over the 2020 election cycle, this year's Democratic presidential primary debates are expected to accommmodate a ["historically large primary field"](https://democrats.org/press/dnc-announces-details-for-the-first-two-presidential-primary-debates/). With only 20 available spots and at least 21 individuals who have announced their candidacy, polling numbers and data on donations will be crucial in determining who attends each subsequent debate. Therefore, for those who have not met the minimum poll and fundraising requirements, which comprise of [reporting more than 65,000 unique donors or registering at least 1% in three separate polls by pre-approved organizations](https://www.nytimes.com/2019/05/02/us/politics/democratic-debates-candidates.html), outreach is crucial for them to stay in the race . While email outreach dominates the call for more unique donors, Twitter also plays a vital role in determining what the issues of priority are throughout the election cycle. Ultimately, key topics that gain traction with the electorate will factor into who eventually goes on to be the official democratic nominee. 
+
+**Using Twitter data from accounts of democratic candidates who are qualified to participate in the first Democratic presidential primary debate in June, I aim to explore which issues are being talked about online and map out where candidates and topics stand relative to one another with regards to political position**. Since the official list of candidates is not set as of now, I highlight candidates who meet the fundraising requirements in this analysis because they are most likely to take the stage by the time participants are selected for next month's debates. This is because, in the event that the number of candidates who meet the polling requirements exceeds 20 individuals, some of the other candidates in this analysis may not participate in the upcoming debate. Due to this uncertainty, this analysis does not aim to make predictions or assumptions about how the 2020 Democratic Primary election cycle will pan out.
+
+## Data
+
+To answer the research question highlighted above, this dataset comprises of tweets from 17 candidates, which include 8 who have met both the fundraising and polling requirements and 9 who have only met the polling requirements. After subsetting the data to contain tweets from December 1, 2018 (right after the midterm elections) to May 1, 2018, the dataset used for analysis contains 4,031 tweets. An overview of the data included in this project is outlined in Table 1. 
+
+```{r table 1,echo=FALSE}
+name <- c("Amy Klobuchar", "Andrew Yang", "Bernie Sanders", "Beto O'Rourke", "Cory Booker", "Eric Swalwell", "Elizabeth Warren", "John Hickenlooper", "Jay Inslee",  "Joe Biden", "John Delaney", "Julian Castro", "Kamala Harris", "Pete Buttigieg", "Kirsten Gillibrand", "Tim Bryan", "Tulsi Gabbard")
+by_sn <- dat %>% group_by(screenName) %>% summarize(n=n())
+by_sn_qual <- dat %>% group_by(screenName,qual) %>% summarize(n=n())
+polls <- rep("yes", 17)
+donors <- ifelse(by_sn_qual$qual==1,"yes","no")
+table1 <- cbind(name=name,handle=by_sn,polls=polls,donors=donors)
+names(table1) <- c("Candidate", "Twitter Handle", "# Tweets", "Meet Poll Requirements", "Meet Fundraising Requirements") 
+
+table1
+```
+<p style="color:#336699";>**Table 1:** An overview of the democratic candidates who are currently qualified to take the stage in the first Democratic Presidential Primary debates that will take place on June 26-27, 2019.</p>
+
+The number of tweets included in this dataset by month are shown below in Figure 1. Due to certain restrictions on my Twitter developer account, the tweets per month may not be indicative of the candidates' overall Twitter activity. That said, I still find it interesting to note that candidates who have not met fundraising requirements report less activity on Twitter compared to their counterparts, especially in the earlier months. We observe a similar pattern when looking into the number of tweets included per person, as shown in Figure 2. 
+
+```{r figure 1,echo=FALSE}
+# group_by date 
+by_date <- dat %>% group_by(created,qual,screenName) %>% summarize(count=n())
+by_date$donor <- ifelse(by_date$qual==1,"yes","no")
+
+# add name string to by_sn_qual df 
+# by_sn_qual <- cbind(name=name,sn_qual=by_sn_qual,donors=donors)
+
+# by date 
+ggplot(by_date, aes(x=created,y=count,fill=donor)) +
+  geom_bar(stat="identity") + 
+  labs(x="Date",y="# Tweets",fill="Meet fundraising requirements?",title="Tweets collected, by month") + 
+  theme(legend.justification=c(0,1),
+        legend.position=c(0.05, 0.95),  
+        legend.background = element_blank(),
+        legend.key = element_blank()) + 
+  scale_fill_manual(values=pal2)
+
+# ggplot(by_date, aes(x=created,y=count,fill=screenName)) + 
+#    geom_bar(stat="identity") + 
+#    scale_fill_viridis(discrete=TRUE,option="D")
+```
+<p style="color:#336699";>**Figure 1:** Summary of tweets included in the dataset by month (December 2018 to May 2019)</p>
+
+When looking at tweets by candidate, we see in Figure 2 that the top four candidates who have tweeted the most are among those who have met fundraising requirements. Further, the average number of tweets from candidates who meet the fundraising requirement doubles the average of tweets per candidate for others; the average number of tweets per candidate for those who meet the fundraising requirements is 332, while that of their counterparts is 164. Another interesting observation (that will not be explored in this analysis) is that the top five candidates with the most tweets included in the dataset are all women. 
+
+```{r figure 2,echo=FALSE}
+# number of tweets by candidate 
+ggplot(by_sn_qual,aes(x=reorder(name,n),y=n,fill=donors)) + 
+  geom_bar(stat="identity") + 
+  labs(x="Candidate",y="# Tweets",fill="Meet fundraising requirements?",title="Tweets Collected, by Candidate") + 
+  theme(legend.justification=c(1,0),
+        legend.position=c(0.95, 0.05),  
+        legend.background = element_blank(),
+        legend.key = element_blank()) + 
+  
+  coord_flip() + 
+  scale_fill_manual(values=pal2)
+```
+<p style="color:#336699";>**Figure 2:** Summary of tweets by candidate</p>
+
+## Methodology 
+
+To explore the extent to which we observe common elements between candidates, which inform our understanding of ideological distance, I construct document-feature-matrices to explore pairwise **cosine similarities** between all candidates. To adjust for potential biases that arise as a result of word frequencies, I use `tf-idf` transformations to observe whether perceived similarities based on word counts hold with weighted estimates. To investigate the topics that arise from the candidates' tweets, I use **structured topic models** to identify the issues that candidates are highlighting on social media, as well as their prevalence by candidate. In addition to using the `stm` package to label topics by words with the highest frequency, I also employ keywords-in-context (KWIC) searches to determine what each topic encompasses in the context of this dataset. 
+
+After looking at ideological distance between candidates and topic prevalence, I use a text analysis model called **wordfish** to measure the ideological position of candidates and words used in the text on a one-dimensional scale. This model assumes that one's political position is determined by how frequently they use certain words, and that the frequency at which words are chosen follow a Poisson distribution. Other key assumptions are that a word's occurrence in a text is independent of other words, and that underlying positions in text are assumed to be on a "left-right politics dimension" (Slapin and Proksch, 2008, Grimmer and Stewart 2013). This model is particularly powerful in analyzing political positions of democratics, especially with current distinctions between establishment democrats and progressives. 
+
+## Results 
+
+### Cosine similarities 
+
+The pairwise cosine similarities shown below provide an overview of the extent to which candidates' tweets are similar to one another, which is a crucial component to how the electorate on social media could perceive ideological distance between the candidates. As we can see in Figure 3, the candidates who appear to be most similar to their peers are Kamala Harris, Amy Klobuchar, Kirsten Gillibrand, and Elizabeth Warren. In contrast, tweets from Pete Buttigieg, John Hickenlooper, and Julian Castro appear to have little in common with others'. In line with the overview of data elaborated in the previous section, relative similarities and differences could be attributed to the frequency at which candidates have tweeted; those who appear most similar have tweeted the most, while those who have less similar tweets have lower cosine similarities. 
+
+```{r figure 3, echo=FALSE}
+dem_mat2.1 <- textstat_simil(dem_dfm,
+                          margin="documents", 
+                          method="cosine") %>% 
+  as.matrix()
+
+dem_mat2.1_long <- melt(dem_mat2.1)
+
+fig3a <- ggplot(dem_mat2.1_long,aes(x=Var1,y=Var2)) + 
+  geom_tile(aes(fill=value),color="white") + 
+  labs(title="without tf-idf") + 
+  scale_fill_viridis(name="Similarity") + 
+  theme(axis.text.x=element_text(angle=90),
+        axis.title.x=element_blank(),
+        axis.title.y=element_blank(),
+        legend.position="none",
+        plot.title = element_text(hjust = 0.5,
+                                  size = 8)) + 
+  coord_fixed()
+
+dem_mat2.2 <- textstat_simil(dem_dfm_tfidf,
+                           margin="document",
+                           method="cosine") %>% 
+  as.matrix()
+
+dem_mat2.2_long <- melt(dem_mat2.2)
+
+fig3b <- ggplot(dem_mat2.2_long,aes(x=Var1,y=Var2)) + 
+  geom_tile(aes(fill=value),color="white") + 
+  scale_fill_viridis(name="Similarity") + 
+  labs(title="with tf-idf") + 
+  theme(axis.text.x=element_text(angle=90),
+        axis.title.x=element_blank(),
+        axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        plot.title = element_text(hjust = 0.5,
+                                  size = 8)) +
+  coord_fixed() 
+
+grid.arrange(fig3a,fig3b,ncol=2,top="Pairwise Cosine Similarities Between Candidates' Tweets")
+```
+<p style="color:#336699";>**Figure 3:** Pairwise cosine similarities between candidates' tweets, with tf-idf transformations (right) and without (left)</p>
+
+After using tf-idf transformations, we see that candidates' tweets are not very similar to one another. Accordingly, table 2 provides tf-idf estimates that correspond with the pairwise cosine similarities illustrated above. As observed visually in Figure 2, the estimates confirm that each candidate's are not very similar to one another. In line with observations from above, the highest estimate reported is between Kamala Harris and Amy Klobuchar, with a cosine similarity of .2427. 
+
+```{r table 2, echo=FALSE}
+# estimates for pairwise cosine similarities with tf-idf transformation 
+tab2 <- as.data.frame(dem_mat2.2)
+tab2
+```
+<p style="color:#336699";>**Table 2:** tf-idf estimates for cosine similarities between tweets by candidate</p>
+
+### Topic models 
+
+```{r create stm model for fig,include=FALSE}
+# create stm model
+dem_stm <- convert(dem_dfm, to="stm",docvars=table1)
+## topic model 
+# search <- searchK(dem_stm$documents,dem_stm$vocab,
+#                   K=c(3:15),
+#                    data=dem_stm$meta)
+# search2 <- searchK(dem_stm$documents,dem_stm$vocab,
+#                    K=c(16:20),
+#                    data=dem_stm$meta)
+
+# search_results <- as.data.frame(search$results)
+# search2_results <- as.data.frame(search2$results)
+# searchcum_results <- rbind(search_results,search2_results)
+# 
+# write_csv(search_results,"search_results.csv")
+# write_csv(search2_results,"search2_results.csv")
+# write_csv(searchcum_results,"searchcum_results.csv")
+
+searchcum_results <- read_csv("searchcum_results.csv")
+```
+
+To identify possible key issues of focus by the candidate, I set up a structured topic model (STM) for the Twitter dataset. To identify the optimal number of topics for analysis, I compared exclusivity with semantic coherence for models ranging from 3 to 15 topics. Ultimately, I identified **9 topics** as ideal for this analysis. Using the FREX metric, which is calculated using word FRequency and EXclusivity, the top terms for each topic are outlined below in Table 3. 
+
+```{r figure hidden, include=FALSE}
+# semantic coherence vs. exclusivity 
+fig4 <- ggplot(searchcum_results,aes(x=semcoh,y=exclus)) + 
+  geom_point(size=5,shape=1,color="green") + 
+  geom_text(aes(label=K),size=2) + 
+  geom_smooth(method="lm",se=FALSE,color="blue",size=.3) + 
+  geom_vline(xintercept = mean(searchcum_results$semcoh), size = .2, linetype="dashed") +
+    geom_hline(yintercept = mean(searchcum_results$exclus), size = .2, linetype="dashed") +
+  theme_bw() +
+  ggtitle("Selecting the optimal number of topics for STM") + 
+  xlab("Semantic coherence") + ylab("Exclusivity")
+fig4
+```
+
+
+```{r stm,include=FALSE}
+# topic model using optimal number of topics [K=9]
+model_stm <- stm(dem_stm$documents,dem_stm$vocab,
+                  K=9,
+                  data=dem_stm$meta,
+                  init.type="Spectral")
+```
+
+```{r table stm topics,echo=FALSE}
+tab3 <- data.frame(t(labelTopics(model_stm,n=9)$frex))
+names(tab3) <- c("Topic 1","Topic 2","Topic 3","Topic 4","Topic 5","Topic 6","Topic 7","Topic 8","Topic 9")
+tab3
+```
+<p style="color:#336699";>**Table 3:** List of words with highest FREX scores from a 9-topic model</p>
+
+```{r figure 5, include=FALSE}
+plot(model_stm,type="summary", labeltype = "frex", xlim = c(0, 1.5), n = 10, text.cex = .75)
+```
+
+
+```{r failed GloVe attempt due to deprecated matrix, include=FALSE}
+# dem_tokens <- tweets %>% tolower %>% word_tokenizer()
+# it <- itoken(dem_tokens)
+# v <- create_vocabulary(it) %>% prune_vocabulary(term_count_min=10)
+# vectorizer <- vocab_vectorizer(v)
+# tcm <- create_tcm(it, vectorizer)
+# # GloVe 
+# model <- GlobalVectors$new(word_vectors_size=50, 
+#                            vocabulary=v, 
+#                            x_max=10, 
+#                            learning_rate=0.20)
+# wv_main <- model$fit_transform(tcm,n_iter=25)
+# wv_context <- model$components
+# wv <- wv_main + t(wv_context)
+# 
+# # formula for inspecting terms of interest 
+# search_synonyms <- function(wv, selected_vector) {
+#   
+#     similarities <- wv %*% selected_vector %>%
+#         tidy() %>%
+#         as_tibble() %>%
+#         rename(token = .rownames,
+#                similarity = unrowname.x.)
+#     
+#     similarities %>%
+#         arrange(-similarity)    
+# }
+```
+
+```{r kwic, include=FALSE}
+# topic 1- job security, people against private interests of large corporations (+ the military) 
+kwic(dem_tok, pattern="bravery",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="brave",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="greed",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="ceo",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="elected",window=3,valuetype="fixed")
+
+# topic 3- amy klobuchar tweets so much she has her own category 
+kwic(dem_tok, pattern="minnesota",window=3,valuetype="fixed")
+
+# topic 4- the trump administration's appointment of william barr as attorney general 
+kwic(dem_tok, pattern="ag",window=3,valuetype="fixed")
+
+# topic 5- tweets advocating for for improvements in health equity (particularly for black women/mothers), labor conditions for public servants (educators) 
+# dominated by kamala harris and elizabeth warren 
+kwic(dem_tok, pattern="teacher",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="black",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="mother",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="teachers",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="speak",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="act",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="wall",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="raise",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="california",window=3,valuetype="fixed")
+
+# topic 6- encouraging grassroots-level political participation to incite structural reforms that have been crucial as of recent 
+# (gun reform, systemic racism, student loan forgiveness)
+kwic(dem_tok, pattern="student",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="grateful",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="glad",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="loan",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="structural",window=3,valuetype="fixed")
+
+# topic 7- US military involvement in the middle east 
+# topic dominated by tulsi gabbard 
+kwic(dem_tok, pattern="tulsi",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="aloha",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="war",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="road",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="regime",window=3,valuetype="fixed")
+
+# topic 8- K-12 education, low-income families 
+kwic(dem_tok, pattern="anxiety",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="kids",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="thank",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="paycheck",window=3,valuetype="fixed") #mostly talking about families living paycheck to paycheck as foundation for campaign promise  
+kwic(dem_tok, pattern="stress",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="hope",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="emotional",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="excited",window=3,valuetype="fixed")
+
+# topic 9- Andrew Yang / the campaign trail 
+# slogan is "humanity first", used to be the CEO of VFA 
+kwic(dem_tok, pattern="detroit",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="seattle",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="humanity",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="someone",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="pics",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="friday",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="coming",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="lebanon",window=3,valuetype="fixed")
+kwic(dem_tok, pattern="favorite",window=3,valuetype="fixed")
+```
+
+The topics included in this model comprise of the following:
+
+- **Topic 1**: _Civil rights_, in particular advocating for the protection of people against big corporations
+- **Topic 2**: _Climate change and energy_ policy 
+- **Topic 3**: _Local politics in the Midwest_, but mainly Minnesota
+- **Topic 4**: _The Trump Administration's appointment of William Barr_ as attorney general
+- **Topic 5**: _Health Equity for Black Women_ and improved labor conditions for public servants 
+- **Topic 6**: _Structural reforms_ addressing systemic racism, gun reform, and student loan forgiveness
+- **Topic 7**: _US military involvement_ in the Middle East
+- **Topic 8**: _K-12 education and welfare of low-income families_
+- **Topic 9**: _The campaign trail_, featuring Andrew Yang's "Humanity First" campaign
+
+As shown below, each candidate is attributed to one of the nine topics. Topics shared by more than one candidate include _Topic 1_: Civil rights (Bernie Sanders, Julian Castro, and Kirsten Gillibrand), _Topic 3:_ Local politics in the Midwest (Amy Kloboucher and Pete Buttigieg), _Topic 4:_ The Appointment of William Barr as Attorney General (Eric Swalwell and John Hickenlooper), _Topic 5:_ Health equity for black women and improved labor conditions for public servants (Joe Biden and Kamala Harris), _Topic 6:_ Structural Reforms (Beto O'Rourke and Elizabeth Warren), _Topic 7:_ US military involvement in the Middle East (John Delaney and Tulsi Gabbard) and _Topic 8:_ K-12 education and welfare for low-income families (Cory Booker and Tim Ryan). Therefore, in mapping out candidates and topics by political ideology, I am interested in the extent to which candidates in groups listed above are close in political position. 
+
+```{r figure 6,echo=FALSE}
+cands <- tidy(model_stm,matrix="gamma",document_names=paste0(names(dem_stm$documents)))
+gamma <- str_split(cands$document,"_",simplify=TRUE) %>% cbind(.,cands)
+
+fig6 <- ggplot(gamma,aes(x=document,y=topic)) + 
+  geom_tile(aes(fill=gamma),colour = "white") +
+  theme(axis.text.x = element_text(angle = 90),
+        legend.position="none") + 
+  labs(x="",y="Topic",title="Who is talking about what?") + 
+  scale_y_discrete(limits=1:9)
+
+fig6
+```
+<p style="color:#336699";>**Figure 4:** Illustrating which candidates are attributed to each of the topics in the STM</p>
+
+### Mapping out the political position of candidates and topics using wordfish
+
+```{r wordfish model, include=FALSE,message=FALSE}
+# political positions of words with highest FREX score by topic by candidate 
+dem_wf <- textmodel_wordfish(dem_dfm_tfidf)
+```
+
+As mentioned above, wordfish is an appropriate model to use for this dataset because it is a word scaling algorithm that estimates political positions from text documents in one dimension (Slapin and Proksh 2008). While it is a very powerful tool, it comes with its limitations as an unsupervised model that estimates the positions of documents solely based on word frequencies. Therefore, while the model gives us a starting point on patterns in text, we should exercise caution in interpreting the results. 
+
+With regards to comparing the different candidates, the parameter of interest is theta (θ) which positions the political actors in the model. The result of applying the wordfish algorithm to the Twitter dataset is shown in Figure 5. A particularly surprising result is that Andrew Yang was classified as farthest right of the 17 candidates, which conflicts with his reputation as a very liberal candidate running on a platform promoting a nation-wide Universal Basic Income (UBI) system. Another surprising result is that Joe Biden is positioned as left of center. This is because, as a former Vice President who is generally known as an "establishment democrat", his nomination has been received with some skepticism from millenials and other groups that tend to be more liberal. 
+
+In addition to investigating where candidates lie on the left-right scale, identifying potential "clusters" based on findings from the previous section is also of interest. Of the groups divided by topic listed above, there are only three groups that have similar theta coefficients- Topic 1 (Bernie Sanders, Julian Castro, and Kirsten Gillibrand), Topic 5 (Joe Biden and Kamala Harris), and Topic 8 (Cory Booker and Tim Ryan). These results also support some of the patterns we observe in the pairwise cosine similarities above, as Kamala Harris (who seemed to have the most in common with others) is shown to have a beta coefficient close to several other candidates.
+
+```{r fig 5, echo=FALSE}
+textplot_scale1d(dem_wf)
+```
+<p style="color:#336699";>**Figure 5:** Estimates of θ coefficient by candidate, on a left-right ideological scale</p>
+
+As for the parameters in the algorithm that consider the extent to which words differentiate party positions (β) and word fixed effects (ψ), I highlight key words from the nine topics defined in the STM from the previous section to estimate the extent to which certain topics affect partisanship. As shown below, we can see that war, local politics, and "humanity" (which in this context is just a keyword primarily used for Andrew Yang's campaign) are among the more "polarizing" words. As expected, most of the key words cited in the tweets cluster at the center, as using more neutral language attracts a larger audience. 
+
+```{r fig 7, echo=FALSE, fig.cap="Estimates of β coefficient and fixed effect of words, highlighted by topic"}
+textplot_scale1d(dem_wf,margin="features",
+                 highlighted=c("bravery", "climate", "minnesota", "barr", "black", "grassroots", "war", "paycheck","humanity"),
+                 highlighted_color = c("#990000","#472D7BFF","#3B528BFF","#2C728EFF","#21908CFF", "#1a1a1a", "#21916c","#666633","#3366ff"))
+```
+<p style="color:#336699";>**Figure 6:** Estimates of β coefficient and fixed effect of words, highlighted by topic</p>
+
+```{r investigating each topic, include=FALSE}
+textplot_scale1d(dem_wf,margin="features",
+                 highlighted=tab3$`Topic 1`,
+                 highlighted_color = c("#3366ff"))
+textplot_scale1d(dem_wf,margin="features",
+                 highlighted=tab3$`Topic 2`,
+                 highlighted_color = c("#3366ff"))
+textplot_scale1d(dem_wf,margin="features",
+                 highlighted=tab3$`Topic 3`,
+                 highlighted_color = c("#3366ff"))
+textplot_scale1d(dem_wf,margin="features",
+                 highlighted=tab3$`Topic 4`,
+                 highlighted_color = c("#3366ff"))
+textplot_scale1d(dem_wf,margin="features",
+                 highlighted=tab3$`Topic 5`,
+                 highlighted_color = c("#3366ff"))
+textplot_scale1d(dem_wf,margin="features",
+                 highlighted=tab3$`Topic 6`,
+                 highlighted_color = c("#3366ff"))
+textplot_scale1d(dem_wf,margin="features",
+                 highlighted=tab3$`Topic 7`,
+                 highlighted_color = c("#3366ff"))
+textplot_scale1d(dem_wf,margin="features",
+                 highlighted=tab3$`Topic 8`,
+                 highlighted_color = c("#3366ff"))
+textplot_scale1d(dem_wf,margin="features",
+                 highlighted=tab3$`Topic 9`,
+                 highlighted_color = c("#3366ff"))
+```
+
+## Conclusion 
+
+Using Twitter data from politicians who announced their candidacy for the 2020 election, I estimated cosine similarities between texts from each candidate and built a structured topic model to gain a better understanding of what politicians are talking about online. Using the findings from cosine similarities and the 9-topic model, I estimated a wordfish model that measures political position and the impact of individual words on partisanship. I found similar patterns between the cosine similarities and the candidate-level findings generated by the wordfish algorithm. While there is not enough information to make any claims about the relationship between cosine similarity and political position in the respective models, looking into the connection between the two could establish a connection that could allow us to gain more insight on how we can identify ideological distance between tweets as consumers of social media. 
+
+Results that I found to be particularly surprising were the estimates for the theta coefficients in the wordfish model, as I thought some of the candidates who were classified as right-of-center relative to other candidates would be farther left, and vice versa. In considering why this may be the case, I speculate that some contributing factors could include the content of the tweets themselves (i.e. promoting campaigns vs. advocating for social justice causes), or that the dataset was not particularly balanced. Accordingly, a follow-up research question I would be interested in further investigating is the extent to which a politician's tweets reflect their individual views and past actions while in office.
+
+Given the strict assumptions of using the estimates and models above, these results should be regarded cautiously. Some of the limitations that I aim to address in future research using social media data includes working with an unbalanced set- in the data collected, the frequency of tweets was varied, with "high momentum" candidates tweeting almost twice as much as their counterparts on average. This likely biased the estimates, and I would expect that some of the results would not be as pronounced if I apply a random sampling strategy that takes these individual-level differences into account. Further, this model could be improved by including other exogenous variables into account, such as embededness in certain social networks and who manages the candidate's social media. 
+
+## Ethics Statement
+
+The data used for this project was collected taking best practices in ethical social media research into account. As collecting social media does not require the approval of an Institutional Review Board (IRB), researchers must cautiously exercise discretion to make sure users' privacy and safety are protected. This is especially the case with Twitter data, as [Twitter's Developer Policies](https://developer.twitter.com/en/developer-terms/policy) are vaguely worded and difficult for the platform to regulate. The main ethical considerations with using Twitter data for research, as outlined by Williams et al. (2017), are as follows: 
+
+- **Consider what type of account tweets are being scraped from.** In the case of this paper, tweets were only scraped from politicians' accounts, which are classified as "public figure accounts" and thus free for anyone to use for research purposes. For researchers looking to scrape tweets from organizational or private individual accounts, additional steps need to take place in order to ensure ethical best practices. 
+- **Seek opt-in consent from individuals who tweet sensitive content or can be identified as "vulnerable"**. Even if tweets are anonymized, syntax and other qualities of text can uncover the identity of who wrote the text in the first place. This could be dangerous if certain patterns identified by research lead to vulnerable individuals being targeted. 
+
+While politicians' and other public figure accounts are open for fair use, it is still important to consider whether research will lead to unintended consequences that could harm others. Further, public figures on social media engage with organizational and individual accounts, thus rendering the considerations above necessary before proceeding with research if the involvement of other accounts is sufficiently close. This is why I focused my research on tweets from the politicians themselves, without involving replies or in-depth information about their followers.
+
+
+## References 
+
+Grimmer, J. and Stewart, B.M., 2013. Text as data: The promise and pitfalls of automatic content analysis methods for political texts. Political analysis, 21(3), pp.267-297.
+
+Slapin, Jonathan B. and Sven-Oliver Proksch. 2008. “A scaling model for estimating time-series party
+positions from texts.” American Journal of Political Science 52(3):705–722.
+
+Williams, M.L., Burnap, P. and Sloan, L., 2017. Towards an ethical framework for publishing Twitter data in social research: Taking into account users’ views, online context and algorithmic estimation. Sociology, 51(6), pp.1149-1168.
