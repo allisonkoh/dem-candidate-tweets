@@ -1,6 +1,6 @@
 # Learning from Democratic Candidates’ Tweets
 
-Using cosine similarities, structured topic models and wordfish to map out the political position of candidates and key issues in advance of the 2020 Democratic Primary Election Debates. Analysis was conducted in May 2018. 
+Using cosine similarities, structured topic models and wordfish to map out the political position of candidates and key issues in advance of the 2020 Democratic Primary Election Debates. Analysis was conducted in May 2019. 
 
 ## Overview  
 
