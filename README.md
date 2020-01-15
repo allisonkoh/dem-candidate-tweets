@@ -10,7 +10,7 @@ Over the 2020 election cycle, this year's Democratic presidential primary debate
 
 ## Data
 
-To answer the research question highlighted above, this dataset comprises of tweets from 17 candidates, which include 8 who have met both the fundraising and polling requirements and 9 who have only met the polling requirements. After subsetting the data to contain tweets from December 1, 2018 (right after the midterm elections) to May 1, 2018, the dataset used for analysis contains 4,031 tweets.  
+To answer the research question highlighted above, this dataset comprises of tweets from 17 candidates, which include 8 who have met both the fundraising and polling requirements and 9 who have only met the polling requirements. After subsetting the data to contain tweets from December 1, 2018 (right after the midterm elections) to May 1, 2019, the dataset used for analysis contains 4,031 tweets.  
 
 
 ## Methodology 
